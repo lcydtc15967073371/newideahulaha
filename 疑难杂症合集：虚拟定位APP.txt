@@ -1,0 +1,194 @@
+# 疑难杂症合集：虚拟定位APP Shizuku自动授权失效 + 坐标推送不生效
+
+## 问题一：Shizuku 自动授权从不生效（已修复）
+
+### 现象
+APP内部通过 `ShizukuShell.exec("appops set ...")` 自动授权一直失败。
+
+### 根因：三层问题叠加
+
+**1. ShizukuShell.java 反射参数包装错误（最隐蔽）**
+```java
+// ❌ 错误写法
+Process proc = (Process) m.invoke(null, new Object[]{new String[]{"sh"}, null, null});
+// ✅ 正确写法
+Process proc = (Process) m.invoke(null, new String[]{"sh"}, null, null);
+```
+`Method.invoke(Object obj, Object... args)` 是可变参数，多包一层 `new Object[]{}` 导致参数结构错乱，反射调用永远抛异常。
+
+**2. 时序问题：授权时机太早**
+- `AdbCommandActivity.onCreate` 执行时 APP 进程刚启动，Shizuku Binder 未就绪
+- `ShizukuShell.isAvailable()` 返回 false，授权代码被跳过
+
+**3. 前置检查过多**
+- `if (isAvailable && isGranted)` 才执行 exec，还不如直接 try-catch
+
+### 最终修复
+```kotlin
+// MockLocationService.onStartCommand 开头
+try {
+    ShizukuShell.exec("appops set $packageName android:mock_location allow")
+} catch (_: Exception) {}
+```
+不检查 isAvailable/isGranted，直接 try-catch 执行。
+
+---
+
+## 问题二：坐标从未推送到系统（已修复）
+
+### 现象
+`dumpsys location` 中 `last mock location=`，provider 反复 removed/added。用户描述"2毫秒内被反复添加又移除"。
+
+### 根因：scheduleRetryRegister 递归不停止
+```kotlin
+// ❌ 错误写法
+if (registerProviders(m)) {
+    startPushLoop()
+    // ← 没有 return，继续执行下一行！
+}
+scheduleRetryRegister(retryCount + 1, m)  // 递归继续，1秒后重新注册
+
+// ✅ 正确写法
+if (registerProviders(m)) {
+    startPushLoop()
+    return@synchronized  // 立即停止重试
+}
+```
+注册成功后没有 `return`，递归继续调用自身，导致每 1 秒重新注册一次 provider：
+1. `startPushLoop` 启动的推送循环刚跑起来
+2. 1秒后 `scheduleRetryRegister` 再次触发
+3. `registerProviders` 先 `removeTestProvider` 再 `addTestProvider`
+4. 推送协程/Handler 被 `stopMockInternal` 取消
+5. `last mock location` 永远是 null
+
+**诊断方法：** `dumpsys location` event log 中看到连续 4 次 `removed/added mock provider override`（间隔 1 秒），就是 `scheduleRetryRegister` 未停止的标志。
+
+---
+
+## 问题三：第一次启动定位延迟（需发两次命令）（已修复）
+
+### 现象
+第一次 `am start` 后定位不生效，等 30 秒再发一次才生效。
+
+### 根因
+第一次启动时链路太长：
+```
+AdbCommandActivity → startForegroundService → onCreate → onStartCommand("S") → startMockInternal → registerProviders(可能重试) → startPushLoop
+```
+Handler 的第一轮 post 可能因为 provider 刚注册还没完全就绪而失败，且无重试机制。
+
+### 修复：自愈推送循环
+```kotlin
+startPushLoop()
+  → 后台线程启动
+  → pushOnce() 推送坐标
+  → sleep 500ms
+  → isMockActive() 验证（getLastKnownLocation 检查系统是否采纳）
+  → 最多5次重试
+  → 如果5次都失败 → 强制重新授权 + 重新注册 provider → 再推送
+  → 验证通过 → 启动 Handler 异步轮询（每100ms）
+```
+
+---
+
+## 问题四：registerProviders 第一次总是失败（已绕过）
+
+### 现象
+每次全新启动APP后，第一次 `startMockInternal` 中 `registerProviders()` 总是返回 false。
+
+### 当前方案
+`registerProviders` 返回 false 后不再等待重试，直接启动 `startPushLoop()` 强行推送，同时后台继续重试注册。
+推送循环中的自愈机制（isMockActive检测）会在推送后确认系统是否采纳。
+
+### 验证结果
+从logcat日志看：
+```
+12:50:54.702 calling registerProviders... running=false
+12:50:54.746 registerProviders result=false, starting push loop anyway
+12:50:55.657 mock active confirmed after 4 pushes, entering steady loop
+```
+即使 registerProviders 失败，强行推送4次后系统仍然采纳了模拟坐标。
+
+---
+
+## 问题五：logToFile 写入 /sdcard/Download/ 权限不足（已知）
+
+### 现象
+APP内通过 `logToFile()` 函数想把调试日志写入 `/sdcard/Download/virtuallocation_debug.txt`，但总是失败，日志文件始终为空。
+
+### 根因
+Android 11+ 对 `/sdcard/Download/` 的访问受到严格限制。非 `MANAGE_EXTERNAL_STORAGE` 权限的普通 APP 无法直接通过 `FileWriter` 写入外部存储。即使安装时使用了 `-g` 参数自动授予权限，普通 APP 也不具备直接写 `/sdcard/Download/` 的权限。
+
+logcat 报错：
+```
+android.system.ErrnoException: open failed: EACCES (Permission denied)
+at libcore.io.Linux.open(Native Method)
+```
+
+### 影响范围
+- `logToFile()` 函数完全失效，所有写入 `/sdcard/Download/` 的调试日志都不可见
+- 调试时只能通过 `android.util.Log` 输出到 logcat 查看
+
+### 替代方案
+1. **写日志到 APP 私有目录**（不需要额外权限）：
+   ```kotlin
+   FileWriter("/data/data/$packageName/files/debug.log", true)
+   ```
+   但通过adb shell查看私有目录需要root权限。
+
+2. **通过 logcat 输出**（推荐）：
+   ```kotlin
+   android.util.Log.d("VirtualLocation", msg)
+   ```
+   然后用 `adb logcat -s VirtualLocation:D` 查看。
+
+3. **通过 Shizuku 写入**（不需要 APP 直接写权限）：
+   ```bash
+   ShizukuShell.exec("echo '日志内容' >> /sdcard/Download/debug.txt")
+   ```
+
+### 经验教训
+- Android 11+ 外部存储权限限制严格，直接 FileWriter 写 `/sdcard/` 不可靠
+- 调试日志优先用 `android.util.Log` 输出到 logcat
+- 必须通过 logcat 才能看到完整调试信息
+
+---
+
+---
+
+## 问题六：百度地图/高德SDK 第一次推送不采纳，需要第二次广播（已修复）
+
+### 现象
+第一次 `am start` 后，`last mock location` 已有值（坐标推送成功），但百度地图等APP定位不变。
+手动再发一次 `am start` 后，定位立刻生效。
+
+### 根因
+百度地图等APP内部使用 `requestLocationUpdates` 监听位置变化，系统 `LocationManagerService` 在第一次推送时虽然把坐标写入了 `last mock location`，但某些APP的定位回调需要"第二次激活"才能触发 `onLocationChanged`。具体机制可能与 `ProviderRequest` 状态切换有关。
+
+### 修复方案
+在 `startMockInternal` 中注册 provider 并启动推送循环后，延迟5秒通过 **Shizuku 自动执行 `am start` 命令** 补发第二次广播：
+```kotlin
+android.os.Handler(mainLooper).postDelayed({
+    val lat = curLat; val lng = curLng; val name = curName
+    val cmd = "am start -n $packageName/.AdbCommandActivity --es action start --ef lat $lat --ef lng $lng --es name \"$name\""
+    ShizukuShell.exec(cmd)
+}, 5000)
+```
+使用 Shizuku 执行 `am start` 与用户手动发命令效果完全一致。
+
+---
+
+## 经验教训汇总
+1. 反射调用要检查参数传递方式：`Method.invoke` 可变参数不要多包一层数组
+2. 异常不要完全吞掉：最少输出到 logcat
+3. Shizuku 绑定时序：Service.onStartCommand 比 Activity.onCreate 更可靠
+4. 递归函数要有明确的终止条件！`scheduleRetryRegister` 成功后的 `return` 缺失是坐标永远推不上去的根因
+5. 推送要有自检机制：推送后验证系统是否采纳，不要盲目相信一次推送就成功
+6. 多个小问题叠加 = 一个大问题：反射bug + 时序 + 递归不停止，每个单独不致命，叠加起来让 APP 从无正常工作过
+7. Android 11+ 外部存储权限限制：`/sdcard/Download/` 不能用 FileWriter 直接写入，debug日志必须走 logcat
+8. `pm install -r` 覆盖安装不会杀死旧进程，需要手动 kill 才能让新代码生效
+9. 某些APP（百度地图/高德SDK）需要两次广播才能采纳定位，通过 Shizuku 内部自动补发解决
+
+## 相关文件
+- `ShizukuShell.java` — 修复反射参数传递
+- `MockLocationService.kt` — onStartCommand自动授权 + scheduleRetryRegister return修复 + 自愈推送循环 + Shizuku自动补发广播

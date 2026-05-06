@@ -1,0 +1,279 @@
+package com.virtuallocation.app
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Looper
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.virtuallocation.app.ui.theme.VirtualLocationTheme
+import org.json.JSONArray
+import org.json.JSONObject
+
+data class SavedLocation(val name: String, val lat: String, val lng: String)
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { VirtualLocationTheme { VirtualLocationApp() } }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VirtualLocationApp() {
+    val context = LocalContext.current
+    var latitude by remember { mutableStateOf("") }
+    var longitude by remember { mutableStateOf("") }
+    var isMocking by remember { mutableStateOf(MockLocationService.running) }
+    var statusMessage by remember { mutableStateOf(
+        if (MockLocationService.running) "🟢 模拟定位运行中\n纬度: ${MockLocationService.curLat}  经度: ${MockLocationService.curLng}"
+        else "🔴 模拟定位已停止"
+    ) }
+    var statusColor by remember {
+        mutableStateOf(if (MockLocationService.running) Color(0xFF4CAF50) else Color(0xFFF44336))
+    }
+    var savedLocations by remember { mutableStateOf(loadSavedLocations(context)) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        if (granted.values.all { it }) Toast.makeText(context, "权限已获取", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(context, "定位权限被拒绝", Toast.LENGTH_LONG).show()
+    }
+
+    fun saveLocation(name: String, lat: String, lng: String) {
+        val newList = savedLocations + SavedLocation(name, lat, lng)
+        savedLocations = newList; saveLocationsToPrefs(context, newList)
+    }
+
+    fun fetchAndSaveCurrentLocation(onDone: (Boolean, String, String) -> Unit) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+            onDone(false, "", ""); return
+        }
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        
+        // 先尝试获取 Service 中的模拟坐标
+        if (MockLocationService.running && (MockLocationService.curLat != 0.0 || MockLocationService.curLng != 0.0)) {
+            val latStr = String.format("%.6f", MockLocationService.curLat)
+            val lngStr = String.format("%.6f", MockLocationService.curLng)
+            onDone(true, latStr, lngStr); return
+        }
+        
+        // 再尝试获取缓存的GPS坐标
+        var best: Location? = null
+        try { best = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) } catch (_: Exception) {}
+        if (best == null) { try { best = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) } catch (_: Exception) {} }
+        if (best == null) { try { best = lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) } catch (_: Exception) {} }
+        
+        if (best != null) {
+            onDone(true, String.format("%.6f", best.latitude), String.format("%.6f", best.longitude))
+        } else {
+            // 都获取不到时请求一次定位更新
+            try {
+                val listener = object : LocationListener {
+                    override fun onLocationChanged(loc: Location) {
+                        lm.removeUpdates(this)
+                        onDone(true, String.format("%.6f", loc.latitude), String.format("%.6f", loc.longitude))
+                    }
+                    override fun onProviderDisabled(p0: String) {}
+                    override fun onProviderEnabled(p0: String) {}
+                    override fun onStatusChanged(p0: String?, p1: Int, p2: Bundle?) {}
+                }
+                lm.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, Looper.getMainLooper())
+                // 5秒超时
+                android.os.Handler(Looper.getMainLooper()).postDelayed({
+                    try { lm.removeUpdates(listener) } catch (_: Exception) {}
+                    onDone(false, "", "")
+                }, 5000)
+                return
+            } catch (_: Exception) {
+                onDone(false, "", "")
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("虚拟定位", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp).verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(12.dp)) {
+                Text(text = statusMessage, modifier = Modifier.fillMaxWidth().padding(16.dp), textAlign = TextAlign.Center, color = statusColor, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("目标坐标", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("输入你想模拟的位置坐标", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(value = latitude, onValueChange = { if (!isMocking) latitude = it }, label = { Text("纬度 (Latitude)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth(), enabled = !isMocking, singleLine = true)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(value = longitude, onValueChange = { if (!isMocking) longitude = it }, label = { Text("经度 (Longitude)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth(), enabled = !isMocking, singleLine = true)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                OutlinedButton(
+                    onClick = {
+                        fetchAndSaveCurrentLocation { success, latStr, lngStr ->
+                            if (success) {
+                                latitude = latStr; longitude = lngStr
+                                var name = "位置${savedLocations.size + 1}"; var idx = 1
+                                while (savedLocations.any { it.name == name }) { idx++; name = "位置$idx" }
+                                saveLocation(name, latStr, lngStr)
+                                Toast.makeText(context, "已收藏当前位置", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "获取位置失败，请打开GPS后重试", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    enabled = !isMocking,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) { Text("📍 收藏当前位置", fontSize = 13.sp) }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        val lat = latitude.toDoubleOrNull(); val lng = longitude.toDoubleOrNull()
+                        if (lat == null || lng == null) { Toast.makeText(context, "输入有效坐标", Toast.LENGTH_SHORT).show(); return@OutlinedButton }
+                        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) { Toast.makeText(context, "坐标超出范围", Toast.LENGTH_SHORT).show(); return@OutlinedButton }
+                        var name = "收藏${savedLocations.size + 1}"; var idx = 1
+                        while (savedLocations.any { it.name == name }) { idx++; name = "收藏$idx" }
+                        saveLocation(name, String.format("%.6f", lat), String.format("%.6f", lng))
+                        Toast.makeText(context, "已收藏输入坐标", Toast.LENGTH_SHORT).show()
+                    },
+                    enabled = !isMocking,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) { Text("⭐ 收藏输入坐标", fontSize = 13.sp) }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (savedLocations.isNotEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("已保存的坐标（点击应用）", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        savedLocations.forEachIndexed { index, loc ->
+                            var showRenameDialog by remember { mutableStateOf(false) }
+                            var newName by remember { mutableStateOf(loc.name) }
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedButton(onClick = { if (!isMocking) { latitude = loc.lat; longitude = loc.lng } else Toast.makeText(context, "请先停止模拟", Toast.LENGTH_SHORT).show() }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), enabled = !isMocking) {
+                                    Text("${loc.name} (${loc.lat}, ${loc.lng})", fontSize = 12.sp, maxLines = 1)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                IconButton(onClick = { newName = loc.name; showRenameDialog = true }, modifier = Modifier.size(32.dp)) { Text("✏️", fontSize = 13.sp) }
+                                Spacer(modifier = Modifier.width(2.dp))
+                                IconButton(onClick = { savedLocations = savedLocations.toMutableList().also { it.removeAt(index) }; saveLocationsToPrefs(context, savedLocations); Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show() }, modifier = Modifier.size(32.dp)) { Text("✕", fontSize = 14.sp, color = Color.Red) }
+                            }
+                            if (showRenameDialog) {
+                                AlertDialog(onDismissRequest = { showRenameDialog = false }, title = { Text("重命名标签") }, text = { OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("标签名称") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }, confirmButton = { TextButton(onClick = { if (newName.isNotBlank()) { val list = savedLocations.toMutableList(); list[index] = loc.copy(name = newName.trim()); savedLocations = list; saveLocationsToPrefs(context, list); showRenameDialog = false; Toast.makeText(context, "已重命名", Toast.LENGTH_SHORT).show() } }) { Text("确定") } }, dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("取消") } })
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Button(
+                    onClick = {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)); return@Button
+                        }
+                        val lat = latitude.toDoubleOrNull(); val lng = longitude.toDoubleOrNull()
+                        if (lat == null || lng == null) { Toast.makeText(context, "请输入有效坐标", Toast.LENGTH_SHORT).show(); return@Button }
+                        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) { Toast.makeText(context, "坐标超出范围", Toast.LENGTH_SHORT).show(); return@Button }
+                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                        }
+                        MockLocationService.start(context, lat, lng)
+                        isMocking = true
+                        statusMessage = "🟢 模拟定位运行中（通知保活）\n纬度: $lat  经度: $lng"
+                        statusColor = Color(0xFF4CAF50)
+                        Toast.makeText(context, "模拟定位已启动（通知栏保活）", Toast.LENGTH_LONG).show()
+                    },
+                    modifier = Modifier.weight(1f).height(50.dp), enabled = !isMocking,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                ) { Text("🚀 启动模拟", fontSize = 16.sp) }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Button(
+                    onClick = {
+                        MockLocationService.stop(context); isMocking = false
+                        statusMessage = "🔴 模拟定位已停止"; statusColor = Color(0xFFF44336)
+                        Toast.makeText(context, "模拟定位已停止", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.weight(1f).height(50.dp), enabled = isMocking,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF44336))
+                ) { Text("⏹ 停止模拟", fontSize = 16.sp) }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text("使用说明", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("📍 收藏当前位置 - 保存设备当前真实位置\n⭐ 收藏输入坐标 - 保存手动输入的坐标\n📌 点击收藏项自动填入坐标\n🔔 启动后通知栏常驻保活\n🚀 启动模拟前需要在开发者选项中选中本应用", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
+                }
+            }
+        }
+    }
+}
+
+private const val PREFS = "virtual_location_prefs"
+private const val KEY = "saved_locations"
+private fun saveLocationsToPrefs(ctx: Context, list: List<SavedLocation>) {
+    val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val arr = JSONArray(); for (loc in list) { val o = JSONObject(); o.put("name", loc.name); o.put("lat", loc.lat); o.put("lng", loc.lng); arr.put(o) }
+    prefs.edit().putString(KEY, arr.toString()).apply()
+}
+private fun loadSavedLocations(ctx: Context): List<SavedLocation> {
+    val json = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null) ?: return emptyList()
+    val arr = JSONArray(json); val result = mutableListOf<SavedLocation>()
+    for (i in 0 until arr.length()) { val o = arr.getJSONObject(i); result.add(SavedLocation(o.getString("name"), o.getString("lat"), o.getString("lng"))) }
+    return result
+}

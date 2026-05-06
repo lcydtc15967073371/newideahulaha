@@ -1,0 +1,105 @@
+package com.virtuallocation.app
+
+import android.content.Context
+import android.location.Location
+import android.location.LocationManager
+import android.os.Build
+import android.os.SystemClock
+import android.util.Log
+import kotlinx.coroutines.*
+
+class MockLocationHelper(private val context: Context) {
+
+    companion object {
+        private const val TAG = "MockLocationHelper"
+        private const val MOCK_PROVIDER = "gps"
+        private const val UPDATE_INTERVAL_MS = 200L
+    }
+
+    private val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    private var mockJob: Job? = null
+    private var currentLat = 0.0
+    private var currentLng = 0.0
+
+    /**
+     * 启动模拟定位（持续推送位置）
+     * @return 成功返回 null，失败返回错误信息
+     */
+    fun startMock(latitude: Double, longitude: Double): String? {
+        stopMock()
+        currentLat = latitude
+        currentLng = longitude
+
+        return try {
+            removeTestProvider()
+            locationManager.addTestProvider(
+                MOCK_PROVIDER, false, false, false, false, false, false, false,
+                android.location.Criteria.POWER_LOW,
+                android.location.Criteria.ACCURACY_FINE
+            )
+            locationManager.setTestProviderEnabled(MOCK_PROVIDER, true)
+
+            // 用协程持续推送位置
+            mockJob = CoroutineScope(Dispatchers.IO).launch {
+                var seq = 0L
+                while (isActive) {
+                    val loc = Location(MOCK_PROVIDER)
+                    loc.latitude = currentLat
+                    loc.longitude = currentLng
+                    loc.accuracy = 3.0f
+                    loc.time = System.currentTimeMillis()
+                    loc.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+
+                    locationManager.setTestProviderLocation(MOCK_PROVIDER, loc)
+                    seq++
+                    if (seq % 50 == 0L) {
+                        Log.d(TAG, "已推送 $seq 次位置: $currentLat, $currentLng")
+                    }
+                    delay(UPDATE_INTERVAL_MS)
+                }
+            }
+
+            Log.d(TAG, "模拟定位已启动: $latitude, $longitude")
+            null
+
+        } catch (e: SecurityException) {
+            Log.e(TAG, "安全异常: ${e.message}")
+            "权限不足，请检查定位权限和模拟定位授权"
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "参数异常: ${e.message}")
+            "提供者注册失败，请检查是否已被其他应用占用"
+        } catch (e: Exception) {
+            Log.e(TAG, "未知异常: ${e.message}")
+            "启动失败: ${e.localizedMessage}"
+        }
+    }
+
+    /**
+     * 更新模拟坐标（不重启）
+     */
+    fun updateLocation(latitude: Double, longitude: Double) {
+        currentLat = latitude
+        currentLng = longitude
+        Log.d(TAG, "坐标已更新: $latitude, $longitude")
+    }
+
+    /**
+     * 停止模拟定位
+     */
+    fun stopMock() {
+        mockJob?.cancel()
+        mockJob = null
+        try {
+            locationManager.setTestProviderEnabled(MOCK_PROVIDER, false)
+            removeTestProvider()
+        } catch (_: Exception) { }
+        Log.d(TAG, "模拟定位已停止")
+    }
+
+    private fun removeTestProvider() {
+        try { locationManager.removeTestProvider(MOCK_PROVIDER) } catch (_: Exception) { }
+    }
+
+    fun isMocking(): Boolean = mockJob?.isActive == true
+}
+

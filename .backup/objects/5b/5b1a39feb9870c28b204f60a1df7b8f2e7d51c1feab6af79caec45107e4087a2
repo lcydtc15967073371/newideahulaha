@@ -1,0 +1,102 @@
+package com.virtuallocation.app
+
+import android.content.Context
+import android.location.Location
+import android.location.LocationManager
+import android.os.Build
+import android.os.SystemClock
+import android.util.Log
+
+class MockLocationHelper(private val context: Context) {
+
+    companion object {
+        private const val TAG = "MockLocationHelper"
+        private const val MOCK_PROVIDER = "gps"
+    }
+
+    private val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    private var isMocking = false
+
+    /**
+     * 启动模拟定位
+     * @return 成功返回 null，失败返回错误信息
+     */
+    fun startMock(latitude: Double, longitude: Double): String? {
+        if (isMocking) {
+            stopMock()
+        }
+
+        try {
+            // 移除已有的测试提供者
+            removeTestProvider()
+
+            // 添加测试位置提供者
+            locationManager.addTestProvider(
+                MOCK_PROVIDER,
+                false,   // requiresNetwork
+                false,   // requiresSatellite
+                false,   // requiresCell
+                false,   // hasMonetaryCost
+                false,   // supportsAltitude
+                false,   // supportsSpeed
+                false,   // supportsBearing
+                android.location.Criteria.POWER_LOW,
+                android.location.Criteria.ACCURACY_FINE
+            )
+
+            // 启用测试提供者
+            locationManager.setTestProviderEnabled(MOCK_PROVIDER, true)
+
+            // 创建模拟位置
+            val mockLocation = Location(MOCK_PROVIDER)
+            mockLocation.latitude = latitude
+            mockLocation.longitude = longitude
+            mockLocation.accuracy = 1.0f
+            mockLocation.time = System.currentTimeMillis()
+            mockLocation.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+
+            // 连续设置多次确保生效
+            for (i in 0 until 3) {
+                mockLocation.time = System.currentTimeMillis() + i * 1000
+                locationManager.setTestProviderLocation(MOCK_PROVIDER, mockLocation)
+                Thread.sleep(200)
+            }
+
+            isMocking = true
+            Log.d(TAG, "模拟定位已启动: $latitude, $longitude")
+            return null
+
+        } catch (e: SecurityException) {
+            Log.e(TAG, "安全异常: ${e.message}")
+            return "权限不足，请检查定位权限和模拟定位授权"
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "参数异常: ${e.message}")
+            return "提供者注册失败，请检查是否已被其他应用占用"
+        } catch (e: Exception) {
+            Log.e(TAG, "未知异常: ${e.message}")
+            return "启动失败: ${e.localizedMessage}"
+        }
+    }
+
+    /**
+     * 停止模拟定位
+     */
+    fun stopMock() {
+        try {
+            locationManager.setTestProviderEnabled(MOCK_PROVIDER, false)
+            removeTestProvider()
+        } catch (e: Exception) {
+            Log.e(TAG, "停止模拟定位时出错: ${e.message}")
+        }
+        isMocking = false
+        Log.d(TAG, "模拟定位已停止")
+    }
+
+    private fun removeTestProvider() {
+        try {
+            locationManager.removeTestProvider(MOCK_PROVIDER)
+        } catch (_: Exception) { }
+    }
+
+    fun isMocking(): Boolean = isMocking
+}

@@ -1,0 +1,298 @@
+package com.virtuallocation.app
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.virtuallocation.app.ui.theme.VirtualLocationTheme
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            VirtualLocationTheme {
+                VirtualLocationApp()
+            }
+        }
+    }
+}
+
+// 快捷坐标数据
+data class QuickLocation(val name: String, val lat: String, val lng: String)
+
+@Composable
+fun VirtualLocationApp() {
+    val context = LocalContext.current
+    val mockHelper = remember { MockLocationHelper(context) }
+
+    var latitude by remember { mutableStateOf("39.9042") }
+    var longitude by remember { mutableStateOf("116.4074") }
+    var isMocking by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf("🔴 模拟定位已停止") }
+    var statusColor by remember { mutableStateOf(Color(0xFFF44336)) }
+
+    // 定位权限请求
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        if (granted.values.all { it }) {
+            Toast.makeText(context, "权限已获取", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "定位权限被拒绝", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val quickLocations = listOf(
+        QuickLocation("北京", "39.9042", "116.4074"),
+        QuickLocation("上海", "31.2304", "121.4737"),
+        QuickLocation("深圳", "22.5431", "114.0579"),
+        QuickLocation("东京", "35.6762", "139.6503")
+    )
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text("虚拟定位", fontWeight = FontWeight.Bold)
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 状态卡片
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(
+                    text = statusMessage,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    textAlign = TextAlign.Center,
+                    color = statusColor,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 坐标输入卡片
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "目标坐标",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "输入你想模拟的位置坐标",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 纬度输入
+                    OutlinedTextField(
+                        value = latitude,
+                        onValueChange = { if (!isMocking) latitude = it },
+                        label = { Text("纬度 (Latitude)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isMocking,
+                        singleLine = true
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 经度输入
+                    OutlinedTextField(
+                        value = longitude,
+                        onValueChange = { if (!isMocking) longitude = it },
+                        label = { Text("经度 (Longitude)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isMocking,
+                        singleLine = true
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // 快捷坐标按钮
+                    Text(
+                        text = "常用坐标：",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        quickLocations.forEach { loc ->
+                            OutlinedButton(
+                                onClick = {
+                                    if (!isMocking) {
+                                        latitude = loc.lat
+                                        longitude = loc.lng
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                enabled = !isMocking,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                            ) {
+                                Text(loc.name, fontSize = 12.sp)
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // 启动/停止按钮
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                Button(
+                    onClick = {
+                        // 检查权限
+                        if (ContextCompat.checkSelfPermission(
+                                context, Manifest.permission.ACCESS_FINE_LOCATION
+                            ) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            permissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                            return@Button
+                        }
+
+                        val lat = latitude.toDoubleOrNull()
+                        val lng = longitude.toDoubleOrNull()
+                        if (lat == null || lng == null) {
+                            Toast.makeText(context, "请输入有效的坐标", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+                            Toast.makeText(context, "坐标超出有效范围", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        val error = mockHelper.startMock(lat, lng)
+                        if (error == null) {
+                            isMocking = true
+                            statusMessage = "🟢 模拟定位运行中\n纬度: $lat  经度: $lng"
+                            statusColor = Color(0xFF4CAF50)
+                            Toast.makeText(context, "模拟定位已启动", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp),
+                    enabled = !isMocking,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                ) {
+                    Text("🚀 启动模拟", fontSize = 16.sp)
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Button(
+                    onClick = {
+                        mockHelper.stopMock()
+                        isMocking = false
+                        statusMessage = "🔴 模拟定位已停止"
+                        statusColor = Color(0xFFF44336)
+                        Toast.makeText(context, "模拟定位已停止", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp),
+                    enabled = isMocking,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF44336))
+                ) {
+                    Text("⏹ 停止模拟", fontSize = 16.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // 使用说明
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "使用说明",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "1. 输入目标纬度、经度\n" +
+                                "2. 点击「启动模拟」\n" +
+                                "3. 位置即被修改\n\n" +
+                                "注意：部分应用需重启定位才能生效\n" +
+                                "Android 10+ 可能需要 ADB 授权：\n" +
+                                "adb shell appops set com.virtuallocation.app android:mock_location allow",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+    }
+}
